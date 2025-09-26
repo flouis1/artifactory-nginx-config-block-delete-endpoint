@@ -1,0 +1,167 @@
+# =============================================================================
+# ARTIFACTORY WITH DELETE PROTECTION - WORKING VERSION
+# =============================================================================
+# This embeds the nginx config directly in Helm values
+# So Helm templates are processed correctly
+
+nginx:
+  enabled: true
+  artifactoryConf: |
+    # ============================================================
+    # DELETE PROTECTION CONFIGURATION
+    # ============================================================
+    # Map to identify IPs allowed for DELETE operations
+    map $remote_addr $delete_allowed {
+        default 0;  # By default, ALL IPs are BLOCKED for DELETE
+        
+        # AUTHORIZED IPs - CUSTOMIZE HERE
+        172.16.1.99 1;    # Admin IP #1
+        172.16.1.119 1;   # Admin IP #2 (current)
+        172.16.1.100 1;   # Range coverage
+        172.16.1.101 1;
+        172.16.1.102 1;
+        172.16.1.110 1;
+        172.16.1.111 1;
+        172.16.1.112 1;
+        172.16.1.115 1;
+        172.16.1.118 1;
+        172.16.1.120 1;
+        
+        # Add other admin IPs here:
+        # 192.168.1.100 1;  # Example admin IP
+        # 10.0.0.50 1;      # Another admin IP
+    }
+
+    # Map to identify blocked DELETE requests
+    map $request_method:$delete_allowed $delete_blocked {
+        default 0;
+        DELETE:0 1;
+    }
+
+    upstream router {
+      server {{ include "artifactory.fullname" . }}:{{ .Values.router.internalPort }};
+      keepalive 320;
+      keepalive_requests 10000;
+    }
+
+    upstream artifactory {
+      server {{ include "artifactory.fullname" . }}:{{ .Values.artifactory.internalPort }};
+      keepalive 320;
+      keepalive_requests 10000;
+    }
+
+    ## server configuration
+    server {
+        listen 8080;
+        server_name ~(?<repo>.+)\.{{ include "artifactory.fullname" . }} {{ include "artifactory.fullname" . }};
+        
+        # Specialized logs for DELETE security
+        access_log /var/opt/jfrog/nginx/logs/delete_blocked.log combined if=$delete_blocked;
+        
+        if ($http_x_forwarded_proto = '') {
+          set $http_x_forwarded_proto  $scheme;
+        }
+        
+        rewrite ^/artifactory/?$ / redirect;
+        if ( $repo != "" ) {
+          rewrite ^/(v1|v2)/(.*) /artifactory/api/docker/$repo/$1/$2 break;
+        }
+        chunked_transfer_encoding on;
+        client_max_body_size 0;
+
+        # =================================================================
+        # DELETE PROTECTION - ARTIFACTORY API
+        # =================================================================
+        location ~ ^/artifactory/api/ {
+          # DELETE verification
+          set $delete_check 0;
+          if ($request_method = DELETE) {
+            set $delete_check 1;
+          }
+          if ($delete_allowed = 1) {
+            set $delete_check 0;
+          }
+          if ($delete_check = 1) {
+            add_header Content-Type "application/json" always;
+            return 403 '{"error": "DELETE_OPERATION_BLOCKED", "status": 403, "message": "DELETE operations are restricted for security reasons.", "client_ip": "$remote_addr", "timestamp": "$time_iso8601"}';
+          }
+          
+          # Security headers
+          add_header X-Delete-Protection "enabled" always;
+          
+          # Standard proxy configuration
+          proxy_read_timeout  900;
+          proxy_pass_header   Server;
+          proxy_cookie_path   ~*^/.* /;
+          proxy_pass          http://artifactory;
+          proxy_set_header    Connection "";
+          proxy_set_header    X-JFrog-Override-Base-Url $http_x_forwarded_proto://$host;
+          proxy_set_header    X-Forwarded-Port  $server_port;
+          proxy_set_header    X-Forwarded-Proto $http_x_forwarded_proto;
+          proxy_set_header    Host              $http_host;
+          proxy_set_header    X-Forwarded-For   $proxy_add_x_forwarded_for;
+        }
+
+        # =================================================================
+        # DELETE PROTECTION - MODERN UI API
+        # =================================================================
+        location ~ ^/ui/api/v1/ui/admin/repositories/.*/delete {
+          # DELETE verification
+          set $ui_api_delete_check 0;
+          if ($request_method = DELETE) {
+            set $ui_api_delete_check 1;
+          }
+          if ($delete_allowed = 1) {
+            set $ui_api_delete_check 0;
+          }
+          if ($ui_api_delete_check = 1) {
+            add_header Content-Type "application/json" always;
+            return 403 '{"error": "UI_API_DELETE_BLOCKED", "status": 403, "message": "DELETE operations through modern UI API are restricted.", "client_ip": "$remote_addr", "timestamp": "$time_iso8601"}';
+          }
+          
+          # Security headers
+          add_header X-UI-API-Protection "enabled" always;
+          
+          # Proxy to UI API
+          proxy_read_timeout  900;
+          proxy_pass_header   Server;
+          proxy_cookie_path   ~*^/.* /;
+          proxy_pass          http://router;
+          proxy_set_header    Connection "";
+          proxy_set_header    X-JFrog-Override-Base-Url $http_x_forwarded_proto://$host;
+          proxy_set_header    X-Forwarded-Port  $server_port;
+          proxy_set_header    X-Forwarded-Proto $http_x_forwarded_proto;
+          proxy_set_header    Host              $http_host;
+          proxy_set_header    X-Forwarded-For   $proxy_add_x_forwarded_for;
+        }
+
+        location / {
+          proxy_read_timeout  900;
+          proxy_pass_header   Server;
+          proxy_cookie_path   ~*^/.* /;
+          proxy_pass          http://router/;
+          proxy_set_header    Connection "";
+          proxy_set_header    X-JFrog-Override-Base-Url $http_x_forwarded_proto://$host;
+          proxy_set_header    X-Forwarded-Port  $server_port;
+          proxy_set_header    X-Forwarded-Proto $http_x_forwarded_proto;
+          proxy_set_header    Host              $http_host;
+          proxy_set_header    X-Forwarded-For   $proxy_add_x_forwarded_for;
+          add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+          
+          # Security headers
+          add_header X-Delete-Protection "enabled" always;
+          
+          location /artifactory/ {
+            if ( $request_uri ~ ^/artifactory/(.*)$ ) {
+              proxy_pass       http://artifactory/artifactory/$1;
+            }
+            proxy_pass         http://artifactory/artifactory/;
+          }
+          
+          location /pipelines/ {
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_pass http://router;
+          }
+        }
+    }
