@@ -14,6 +14,7 @@ This solution adds **DELETE protection** to JFrog Artifactory using the official
 ```
 helm-integration/
 ├── artifactory-with-security.yaml   # Main configuration file (only file needed!)
+├── update-from-jfrog.sh            # Script to update from latest JFrog chart
 └── README.md                        # This documentation
 ```
 
@@ -145,13 +146,34 @@ Our `artifactory-with-security.yaml` file uses the `nginx.artifactoryConf` param
    ```
 
 ### To Update to Latest JFrog Config
-1. Download the latest config from JFrog's GitHub:
-   ```bash
-   curl -s "https://raw.githubusercontent.com/jfrog/charts/master/stable/artifactory/files/nginx-artifactory-conf.yaml" -o latest-jfrog.conf
-   ```
-2. Merge with our security additions (the DELETE protection maps and location blocks)
-3. Update `artifactory-with-security.yaml`
-4. Redeploy
+
+**IMPORTANT**: Since our configuration embeds the JFrog nginx config, it should be updated periodically to stay current with JFrog releases.
+
+Use the automated update script:
+```bash
+# Run the update script
+./update-from-jfrog.sh
+
+# Review the changes
+git diff artifactory-with-security.yaml
+
+# Test the updated configuration
+helm upgrade --install artifactory jfrog/artifactory \
+  -f artifactory-with-security.yaml \
+  --dry-run --namespace artifactory
+
+# Deploy if everything looks good
+helm upgrade artifactory jfrog/artifactory \
+  -f artifactory-with-security.yaml \
+  --namespace artifactory
+```
+
+The script will:
+1. Download the latest JFrog nginx configuration
+2. Preserve your authorized IP addresses
+3. Merge with our DELETE protection logic
+4. Create a backup of your current config
+5. Generate an updated `artifactory-with-security.yaml`
 
 ## Security Details
 
@@ -212,17 +234,6 @@ kubectl exec deployment/artifactory-artifactory-nginx -n artifactory -- nginx -t
 kubectl rollout restart deployment/artifactory-artifactory-nginx -n artifactory
 ```
 
-## Summary
-
-This solution provides:
-
-- **Simple Setup** - Single YAML file, works out of the box  
-- **DELETE Protection** - Comprehensive security for all endpoints  
-- **Upgrade Safety** - Uses official Helm chart parameters  
-- **Production Ready** - Tested and documented  
-- **Easy Maintenance** - Just edit IPs and redeploy  
-
-**Your Artifactory is now secure with minimal complexity!**
 
 ---
 
